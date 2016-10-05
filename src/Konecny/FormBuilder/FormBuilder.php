@@ -9,102 +9,104 @@ use Nette,
 	Doctrine\Common\Annotations\AnnotationReader,
 	Doctrine\ORM\Mapping as ORM,
 	Symfony\Component\Validator\Constraints as Assert,
-	Konecny\FormBuilder\Annotations\Password,
 	Konecny\FormBuilder\Annotations,
 	Konecny\FormBuilder\Constraints as FormBuilderAssert,
 	Konecny\FormBuilder\Exceptions;
 
 
-
 /**
  * @author Martin Konečný
  */
-class FormBuilder /* implements ArrayAccess */
+class FormBuilder
 {
-
+	
 	/** @var string */
 	private $name;
-	
+    
 	/** @var Form */
 	private $form;
 	
-	/** @var Nette\Localization\ITranslator|NULL */
-	private $translator = NULL;
-	
-	/** @var array|NULL */
-	private $submitButton = NULL;
+	/**
+	 * Metadata of all added entities and its' attributes
+	 *
+	 * @var array
+	 */
+    private $metadata = array();
 	
 	/**
-	 * Determines if hidden input for ID is created
+	 * control name => entity attribute (eg. entity.name, entity.subEntity.name)
+	 *
+	 * @var array
+	 */
+	private $mappings = array();
+	
+	/**
+	 * If inputs will be created automatically
+	 *
+	 * @var bool
+	 */
+	private $autoMode = TRUE;
+	
+	/** @var AnnotationReader */
+	private $annotationReader;
+	
+	/** @var bool */
+	private $createLabels = TRUE;
+	
+	/**
+	 * If submitted values are automatically set to entities
+	 *
+	 * @var bool
+	 */
+	private $autoDataSetting = TRUE;
+	
+	/** @var bool */
+	private $controlsCreated = FALSE;
+	
+	/** @var bool */
+	private $useCsrfProtection = TRUE;
+
+	/** @var bool */
+	private $setDefaultValues = TRUE;
+	
+	/**
+	 * If a hidden input with entity's ID will be created
 	 *
 	 * @var bool
 	 */
 	private $allowId = FALSE;
 	
-	/** @var bool */
-	private $setDefaultValues = TRUE;
+	/** @var string */
+	private $defaultDatetimeFormat = "d.m.Y H:i:s";
 	
-	/** @var bool */
-	private $controlsCreated = FALSE;
-	
-	/** @var string   name of entity's ID property */
-	private $idProperty;
-	
-	/** @var bool */
-	private $createLabels = TRUE;
-	
-	/** @var array */
-	private $mappings = array();
-	
-	/** @var array */
-	private $propertiesData = array();
-	
-	/** @var AnnotationReader */
-	private $annotationReader;
-	
-	/** @var array */
-	private $entities = array();
-	
-    /** @var array */
-    private $inputTypes = array();
-    
-    /** @var array */
-    private $validators = array();
-    
-	/** @var bool */
-	private $useCsrfProtection = TRUE;
-	
-	/** @var array */
-	private $withoutControls = array();
-	
-	/** @var bool */
-	private $withoutAllControls = FALSE;
-	
-	/** @var array */
-	private $entitiesInputNames = array();
+	/** @var Nette\Localization\ITranslator */
+	private $translator;
 	
 	/** @var string */
-	public static $translationFileName = "forms";
+	public static $translationFileName = "form";
 	
-	/** @var string */
-	private $defaultDatetimeFormat;
 	
 	
 	/**
-	 * @param string|NULL
-	 * @param string|object
-	 * @param Nette\Localization\ITranslator
 	 * @param string
+	 * @param Nette\Localization\ITranslator
 	 */
-	public function __construct($name = NULL, $entity, Nette\Localization\ITranslator $translator = NULL, $defaultDatetimeFormat = "d.m.Y H:i:s")
+	public function __construct($name, Nette\Localization\ITranslator $translator = NULL)
 	{
 		$this->name = $name;
-		$this->form = new Form();
-		$this->translator = $translator;
-		$this->defaultDatetimeFormat = $defaultDatetimeFormat;
-		
-		$this->setEntity($entity);
 		$this->annotationReader = new AnnotationReader();
+		$this->form = new Form();
+		
+		$this->setTranslator($translator);
+	}
+	
+	
+	/**
+	 * @param string
+	 */
+	public function setDateTimeFormat($format)
+	{
+		$this->defaultDatetimeFormat = $format;
 	}
 	
 	
@@ -113,336 +115,74 @@ class FormBuilder /* implements ArrayAccess */
 	 */
 	public function setEntity($entity)
 	{
-		$entityRc = new ReflectionClass($entity);
+		$this->createMetadataForEntity($entity, NULL);
 		
-		if (!is_object($entity)) {
-			$entity = $entityRc->newInstance();
+		return $this;
+	}
+	
+
+	/**
+	 * @param string
+	 */
+	public function addSubEntity($propertyName)
+	{
+		$mainEntityData = $this->getMainEntityData();
+		if (!$mainEntityData["rc"]->hasProperty($propertyName)) {
+			throw new \InvalidArgumentException("Entity '{$mainEntityData["rc"]->getName()}' has no sub-entity property '{$entityPropertyName}'.");
 		}
 		
-		$this->entities[0] = array(
-			"entity" => $entity,
-			"rc" => $entityRc,
-			"hash" => spl_object_hash($entity),
-			"class" => get_class($entity),
-			"property" => NULL
-		);
-
+		$entity = $mainEntityData["entity"]->$propertyName;
+		if ($entity === NULL) {
+			foreach ($mainEntityData["rc"]->getProperties() as $propertyRc) {
+				if ($propertyRc->getName() === $propertyName) {
+					foreach ($this->annotationReader->getPropertyAnnotations($propertyRc) as $annotation) {
+						if ($annotation instanceof ORM\OneToOne) {
+							$className = $annotation->targetEntity;
+							$fullName = $mainEntityData["rc"]->getNamespaceName() . "\\" . $className;
+							$entityRc = new ReflectionClass($fullName);
+							$entity = $entityRc->newInstance();
+							
+							break 2;
+						}
+					}
+				}
+			}
+		}
+		
+		if ($entity === NULL) {
+			throw new \InvalidArgumentException("There's no One-To-One relation via property '{$property}'.");
+		}
+		
+		$this->createMetadataForEntity($entity, $propertyName);
+		
 		return $this;
 	}
 	
 	
-	/**
-	 * Creates controls with rules depending on entity's properties.
-	 */
-	public function createControls()
-	{	
-		if ($this->controlsCreated) {
-			return;
-		}
-		if ($this->getMainEntityData() === NULL) {
-			throw new Exceptions\FormBuilderException("Entity has not been set.");
-		}
-		
-		foreach ($this->entities as $entityData) {
-			$this->createControlsForEntity($entityData);
-		}
-        
-		// try to automatically add a submit button
-		/*
-		if ($this->submitButton !== NULL) {
-			$this->form->addSubmit($this->submitButton[0], $this->submitButton[1]);
-		}
-		*/
-		
-		if ($this->useCsrfProtection) {
-			$this->form->addProtection();
-		}
-		
-		if ($this->hasTranslator()) {
-			$submitButtonName = $this->getSubmitButtonName();
-			$translateKey = self::$translationFileName . ".{$this->name}.submit";
-			$label = $this->translator->translate($translateKey);
-			$this->form->addSubmit($submitButtonName, $label);
-		}
-		
-		
-		$this->createValidationCallback();
-		$this->controlsCreated = TRUE;
- 	}
-	
-    
-	/**
-	 * @param array
-	 */
-	private function createControlsForEntity($entityData)
+	public function create()
 	{
-		$entity = $entityData["entity"];
-		$entityRc = $entityData["rc"];
-		$entityHash = $entityData["hash"];
-		$entityPropertyName = $entityData["property"];
-		
-		foreach ($entityRc->getProperties() as $property) {
-			if (!$this->withoutAllControls) {
-				$this->createControlByProperty($property, $entityData);
-			}
+		$this->createControls();
+	
+		if ($this->autoDataSetting) {
+			$this->createAutoDataSetting();
 		}
 		
-		if ($this->withoutAllControls) {
-			
-			// when we want to remove all components (eg. because of manual mapping) and an entity is being edited
-			if ($this->allowId) {
-				$entityData = $this->getMainEntityData();
-				$property = $this->getMainEntityIdProperty();
-				$this->createControlByProperty($property, $entityData);
-			}
-		}
-		
-		if (!isset($this->inputTypes[$entityHash])) {
-			return;
-		}
-		
-		foreach ($this->inputTypes[$entityHash] as $property => $type) {
-			if (!$this->propertiesData[$entityHash][$property]["isColumn"]) {
-				continue;
-			}
-			
-			$method = "add" . ucFirst($this->inputTypes[$entityHash][$property]);
-			
-			$label = NULL;
-			if ($this->createLabels && $property !== $this->idProperty) {
-				if (!$this->hasTranslator()) {
-					throw new Exceptions\FormBuilderException("Translator for FormBuilder has not been set.");
-				}
-				
-				$subEntityPropertyKey = "";
-				if ($entityPropertyName !== NULL) {
-					$subEntityPropertyKey = ".{$entityPropertyName}";
-				}
-					
-				$translateKey = self::$translationFileName . ".{$this->name}{$subEntityPropertyKey}.{$property}";
-				$label = $this->translator->translate($translateKey);
-			}
-			
-			$mainEntityName = $this->getMainEntityData()["rc"]->name;
-			$mainEntityNameParts = explode("\\", $mainEntityName);
-			$mainEntityName = lcFirst(end($mainEntityNameParts));
-			
-			if ($this->isMainEntity($entityHash)) {
-				$inputName =  "{$mainEntityName}_{$property}";
-			} else {
-				$inputName = "{$mainEntityName}_{$entityPropertyName}_{$property}";
-			}
-			
-			$control = $this->form->$method($inputName, $label);
-			$this->entitiesInputNames[] = $inputName;
-			
-			if ($property === $this->idProperty || $this->setDefaultValues) {
-				$defaultValue = $entity->$property;
-				if (is_object($defaultValue) && $defaultValue instanceof \DateTime) {
-					$defaultValue = $defaultValue->format($this->defaultDatetimeFormat);
-				}
-				
-				$control->setDefaultValue($defaultValue);
-			}
-			
-			
-			// rules
-			$this->createRulesForProperty($entityHash, $property, $control);
-		}
-    }
-	
-	
-	
-	private function createRulesForProperty($entityHash, $property, $control)
-	{
-		if (!isset($this->validators[$entityHash][$property])) {
-			return;
-		}
-			
-		$rules = $this->validators[$entityHash][$property];
-
-		foreach ($rules as $rule) {
-			$ruleMsg = $rule["msg"];
-			$translateArg = NULL;
-			$ruleArg = NULL;
-				
-			if ($rule["type"] === Form::LENGTH || $rule["type"] === Form::RANGE) {
-				$translateArg = array(
-					"%requiredMin%" => $rule["min"],
-					"%requiredMax%" => $rule["max"]
-				);
-					
-				$ruleArg = array($rule["min"], $rule["max"]);
-			} elseif (in_array($rule["type"], array(Form::FILLED, Form::EMAIL, Form::URL, Form::INTEGER, Form::FLOAT))) {
-				// seems nothing is needed to be here
-					
-			} elseif (in_array($rule["type"], array(Form::MIN, Form::MAX, Form::PATTERN, Form::MIN_LENGTH, Form::MAX_LENGTH))) {
-				$translateArg = array("%requiredValue%" => $rule["value"]);
-				$ruleArg = $rule["value"];
-			}
-				
-			if ($this->hasTranslator()) {
-
-				// control's value is automatically replaced using %value modifier
-				// @see https://doc.nette.org/cs/2.4/forms#toc-validace
-				$ruleMsg = $this->translator->translate($ruleMsg, $translateArg);
-			}
-				
-			$control->addRule($rule["type"], $ruleMsg, $ruleArg);
-		}
-	}
-	
-	
-	
-	
-	/**
-	 * @param ReflectionProperty
-	 * @param array
-	 */
-	private function createControlByProperty($property, $entityData)
-	{
-		$entity = $entityData["entity"];
-		$entityHash = $entityData["hash"];
-		$entityPropertyName = $entityData["property"];
-	
-		$propertyName = $property->name;
-		if (!$this->isMainEntity($entityHash)) {
-			$propertyName = "{$entityPropertyName}.{$property->name}";
-		}
-           
-		if (in_array($propertyName, $this->withoutControls)) {
-			return;
-		}
-		
-		$this->createValidationInfoForProperty($property, $entityData);
-	}
-    
-	
-	
-	/**
-	 * Tries to save all submitted values into entity during validation process.
-	 */
-	private function createValidationCallback()
-	{
-		$this->form->onValidate[] = function($form) {
-			foreach ($form->getControls() as $control) {
-				
-				if ($control instanceof Nette\Forms\Controls\SubmitButton || $control->name === Form::TRACKER_ID || $control->name === Form::PROTECTOR_ID) {
-					continue;
-				}
-
-				// if there's an individual mapping for this property
-				if (isset($this->mappings[$control->name])) {
-					list($propertyInfo, $callback) = $this->mappings[$control->name];
-					$property = explode(".", $propertyInfo);
-					
-					if (is_callable($callback)) {
-						$value = $callback($control->value, $control);
-					} else {
-						$value = $control->value;
-					}
-					
-					$mainEntityData = $this->getMainEntityData();
-					$mainEntity = $mainEntityData["entity"];
-					
-					if (count($property) > 1) {  // entity.property
-						list($subEntityName, $subProperty) = $property;
-						$subEntity = $mainEntity->$subEntityName;
-						
-						if ($subEntity !== NULL) {  // what if yes?
-							$subEntity->$subProperty = $value;
-						}
-						
-					} else {
-						$mainEntity->$property[0] = $value;
-					}
-				} else {  // automatical mapping
-				
-					if (!in_array($control->name, $this->entitiesInputNames)) {
-						continue;
-					}
-					
-					$data = explode("_", $control->name);
-					$property = end($data);
-					$entityData = $this->getEntityDataByControlName($control->name);
-					if ($this->isMainEntity($entityData["hash"])) {
-						$entityData["entity"]->$property = $control->value;
-					} else {
-						$subEntity = $data[1];
-
-						$subEntityObject = $this->getMainEntityData()["entity"]->$subEntity;
-						$subEntityObject->$property = $control->value;
-					}
-					
-				}	
-			}
-		};
+		return $this;
 	}
 	
 	
 	/**
 	 * @param string
-	 * @return mixed
+	 * @param string|NULL
+	 * @param callable|NULL
 	 */
-	public function __get($key)
+	public function setMapping($controlName, $property = NULL, callable $callback = NULL)
 	{
-		if ($key === "form") {
-			
-			// is it a good idea to let the controls to be created here?
-			// in __toString() method it doesn't work
-			$this->createControls();
-			
-			return $this->form;
-		}
-		if ($key === "entity") {
-			return $this->getMainEntityData()["entity"];
-		}
-		if ($key === "translator") {
-			return $this->translator;
+		if ($property === NULL) {
+			$property = $controlName;
 		}
 		
-		return $this->form[$key];
-	}
-	
-	
-	/**
-	 * May be able only to set validation scope or set omitted.
-	 *
-	 * @param string (list of arguments)
-	 */
-	public function without()
-	{
-		$controls = func_get_args();
-		$this->withoutControls = array_merge($this->withoutControls, $controls);
-		
-		if ($this->controlsCreated) {
-			foreach ($controls as $control) {
-				$this->form->removeComponent($this->control($control));
-			}
-		}
-		
-		return $this;
-	}
-	
-	
-	public function withoutAll()
-	{
-		$this->withoutAllControls = TRUE;
-		
-		return $this;
-	}
-	
-
-	/**
-	 * TODO: label keys should be entity properties
-	 *
-	 * @param array
-	 */
-	public function setLabels(array $labels = array())
-	{
-		foreach ($labels as $control => $label) {
-			$this->form[$control]->setLabel($label);
-		}
+		$this->mappings[$controlName] = array($property, $callback);
 		
 		return $this;
 	}
@@ -451,9 +191,55 @@ class FormBuilder /* implements ArrayAccess */
 	/**
 	 * @param bool
 	 */
-	public function allowId($bool = TRUE)
+	public function enableCsrfProtection($enable = TRUE)
 	{
-		$this->allowId = (bool) $bool;
+		$this->useCsrfProtection = (bool) $enable;
+		
+		return $this;
+	}
+	
+	
+	/**
+	 * @param Nette\Localization\ITranslator
+	 */
+	public function setTranslator(Nette\Localization\ITranslator $translator)
+	{
+		$this->translator = $translator;
+		
+		return $this;
+	}
+	
+	
+	/**
+	 * @param string
+	 * @param bool
+	 * @return Nette\Forms\IControl
+	 */
+	public function control($name, $exactName = FALSE)
+	{
+		if (!$exactName) {
+			if (strpos($name, ".") !== FALSE) {
+				$name = str_replace(".", "_", $name);
+			}
+			
+			$mainEntityName = $this->getEntityClassName($this->getMainEntityData()["rc"]);
+			$name = "{$mainEntityName}_{$name}";
+		}
+
+		if (!$this->controlsCreated) {
+			$this->createControls();
+		}
+		
+		return $this->form[$name];
+	}
+	
+	
+	/**
+	 * @param bool
+	 */
+	public function setCreateLabels($bool = TRUE)
+	{
+		$this->createLabels = (bool) $bool;
 		
 		return $this;
 	}
@@ -473,9 +259,93 @@ class FormBuilder /* implements ArrayAccess */
 	/**
 	 * @param bool
 	 */
-	public function setCreateLabels($bool = TRUE)
+	public function allowId($bool = TRUE)
 	{
-		$this->createLabels = (bool) $bool;
+		$this->allowId = (bool) $bool;
+		
+		return $this;
+	}
+	
+	
+	/**
+	 * @param array
+	 */
+	public function setLabels(array $labels = array())
+	{
+		foreach ($labels as $property => $label) {
+			$this->control($property)->setLabel($label);
+		}
+		
+		return $this;
+	}
+	
+	
+	/**
+	 * @param bool
+	 */
+	public function setAutoMode($bool)
+	{
+		$this->autoMode = (bool) $bool;
+		
+		return $this;
+	}
+	
+	
+	/**
+	 * @param bool
+	 */
+	public function setAutoDataSetting($bool)
+	{
+		$this->autoDataSetting = (bool) $bool;
+		
+		return $this;
+	}
+	
+	
+	/**
+	 * @param string (list of arguments)
+	 */
+	public function with()
+	{
+		$attributes = func_get_args();
+		foreach ($attributes as $attribute) {
+			$property = $this->getPropertyByAttribute($attribute);
+			
+			$entityData = $this->getEntityDataByAttribute($attribute);
+			$propertyRc = new ReflectionProperty($entityData["entity"], $property);
+			$this->createMetadataForProperty($propertyRc, $entityData["rc"], $entityData["entity"]);
+		}
+		
+		return $this;
+	}
+	
+	
+	/**
+	 * May be able only to set validation scope or set omitted.
+	 *
+	 * @param string (list of arguments)
+	 */
+	public function without()
+	{
+		$attributes = func_get_args();
+		
+		foreach ($attributes as $attribute) {
+			
+			foreach ($this->mappings as $controlName => $mapping) {
+				if ($mapping[0] === $attribute) {
+					unset($this->mappings[$controlName]);
+				}
+			}
+			
+			$entity = $this->getEntityDataByAttribute($attribute)["entity"];
+			$hash = spl_object_hash($entity);
+			$property = $this->getPropertyByAttribute($attribute);
+			unset($this->metadata[$hash]["attributes"][$property]);
+			
+			if ($this->controlsCreated) {
+				$this->form->removeComponent($this->control($attribute));
+			}
+		}
 		
 		return $this;
 	}
@@ -483,37 +353,26 @@ class FormBuilder /* implements ArrayAccess */
 	
 	/**
 	 * @param string
-	 * @param bool
-	 * @return Nette\Forms\IControl
+	 * @return mixed
 	 */
-	public function control($name, $exactName = FALSE)
+	public function __get($key)
 	{
-		if (!$exactName) {
-			if (strpos($name, ".") !== FALSE) {
-				$name = str_replace(".", "_", $name);
-			}
+		if ($key === "form") {
 			
-			$mainEntityName = $this->getMainEntityData()["rc"]->name;
-			$mainEntityNameParts = explode("\\", $mainEntityName);
-			$mainEntityName = lcFirst(end($mainEntityNameParts));
-			$name = "{$mainEntityName}_{$name}";
+			// is it a good idea to let the controls to be created here?
+			// in __toString() method it doesn't work
+			$this->create();
+			
+			return $this->form;
 		}
-
-		if (!$this->controlsCreated) {
-			$this->createControls();
+		if ($key === "entity") {
+			return $this->getMainEntityData()["entity"];
+		}
+		if ($key === "translator") {
+			return $this->translator;
 		}
 		
-		return $this->form[$name];
-	}
-	
-	
-	/**
-	 * @param string
-	 * @param string
-	 */
-	public function addSubmit($name, $label)
-	{
-		$this->submitButton = array($name, $label);
+		return $this->form[$key];
 	}
 	
 	
@@ -527,24 +386,285 @@ class FormBuilder /* implements ArrayAccess */
 	
 	
 	/**
-	 * @param Nette\Localization\ITranslator
+	 * @param string
 	 */
-	public function setTranslator(Nette\Localization\ITranslator $translator)
+	public function setMethod($method)
 	{
-		$this->translator = $translator;
+		$this->form->setMethod($method);
+		
+		return $this;
 	}
 	
 	
-	public function create()
+	
+	/**
+	 * @return array
+	 */
+	private function getMainEntityData()
 	{
-		$this->createControls();
+		foreach ($this->metadata as $data) {
+			if ($data["property"] === NULL) {
+				return $data;
+			}
+		}
+		
+		throw new Exceptions\FormBuilderException("No main entity set");
+	}
+	
+	
+	/**
+	 * @param string|object
+	 * @param string
+	 */
+	private function createMetadataForEntity($entity, $property)
+	{
+		$entityRc = new \ReflectionClass($entity);
+
+		if (!is_object($entity)) {
+			$entity = $entityRc->newInstance();
+		}
+		
+		$entityHash = spl_object_hash($entity);
+		
+		$this->metadata[$entityHash] = array("property" => $property, "entity" => $entity, "rc" => $entityRc, "attributes" => array());
+
+		if (!$this->autoMode && $property !== NULL) {
+			return;
+		}
+		
+		
+		// allow only ID hidden input to be created while editing and set to manual mapping
+		if (!$this->autoMode) {
+			$idProperty = $this->getMainEntityIdProperty();
+			$this->createMetadataForProperty($idProperty, $entityRc, $entity);
+			
+			return;
+		}
+		
+		foreach ($entityRc->getProperties() as $property) {
+			$this->createMetadataForProperty($property, $entityRc, $entity);
+		}
+	}
+	
+	
+	/**
+	 * @param ReflectionProperty
+	 * @param ReflectionClass
+	 * @param object
+	 */
+	private function createMetadataForProperty($propertyRc, $entityRc, $entity)
+	{
+		$entityHash = spl_object_hash($entity);
+		$annotations = $this->annotationReader->getPropertyAnnotations($propertyRc);
+		$name = $propertyRc->getName();
+		
+		$data = array(
+			"id" => FALSE,
+			"rc" => $propertyRc,
+			"name" => $name,
+			"rules" => array(),
+			"ignore" => FALSE,
+			"password" => FALSE,
+			"controlCreated" => FALSE
+		);
+		
+		$isColumn = FALSE;
+		foreach ($annotations as $annotation) {
+			
+			// table column information
+			if ($annotation instanceof ORM\Column) {
+				$data["type"] = $annotation->type;
+				$isColumn = TRUE;
+				
+				if (in_array($annotation->type, array("string", "integer", "float", "date", "datetime"))) {
+					$data["inputType"] = "text";
+				} elseif ($annotation->type === "text") {
+					$data["inputType"] = "textArea";
+				} elseif ($annotation->type === "boolean") {
+					$data["inputType"] = "checkbox";
+				}
+			} elseif ($annotation instanceof ORM\Id) {
+				$data["id"] = TRUE;
+			} elseif ($annotation instanceof Annotations\Ignore) {
+				$data["ignore"] = TRUE;
+			} elseif ($annotation instanceof Annotations\Password) {
+				$data["password"] = TRUE;
+
+				// validation annotations
+			} elseif ($annotation instanceof FormBuilderAssert\Filled || $annotation instanceof Assert\NotBlank) {
+				$data["rules"][] = array("type" => Form::REQUIRED, "value" => TRUE, "message" => $annotation->message);
+			} elseif ($annotation instanceof FormBuilderAssert\MinLength) {
+				$data["rules"][] = array("type" => Form::MIN_LENGTH, "value" => $annotation->value, "message" => $annotation->message);
+			} elseif ($annotation instanceof FormBuilderAssert\Length) {
+				$data["rules"][] = array(
+					"type" => Form::LENGTH,
+					"message" => $annotation->message,
+					"value" => $annotation->value
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\MinLength) {
+				$data["rules"][] = array(
+					"type" => Form::MIN_LENGTH,
+					"message" => $annotation->message,
+					"value" => $annotation->value
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\MaxLength) {
+				$data["rules"][] = array(
+					"type" => Form::MAX_LENGTH,
+					"message" => $annotation->message,
+					"value" => $annotation->value
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\Range) {
+				$data["rules"][] = array(
+					"type" => Form::RANGE,
+					"min" => $annotation->min,
+					"max" => $annotation->max,
+					"message" => $annotation->message,
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\Email) {
+				$data["rules"][] = array(
+					"type" => Form::EMAIL,
+					"message" => $annotation->message
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\Max) {
+				$data["rules"][] = array(
+					"type" => Form::MAX,
+					"message" => $annotation->message,
+					"value" => $annotation->value
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\Min) {
+				$data["rules"][] = array(
+					"type" => Form::MIN,
+					"message" => $annotation->message,
+					"value" => $annotation->value
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\Pattern) {
+				$data["rules"][] = array(
+					"type" => Form::PATTERN,
+					"message" => $annotation->message,
+					"value" => $annotation->value
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\Url) {
+				$data["rules"][] = array(
+					"type" => Form::URL,
+					"message" => $annotation->message
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\Integer) {
+				$data["rules"][] = array(
+					"type" => Form::INTEGER,
+					"message" => $annotation->message
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\Float) {
+				$data["rules"][] = array(
+					"type" => Form::FLOAT,
+					"message" => $annotation->message
+				);
+			} elseif ($annotation instanceof FormBuilderAssert\LengthRange) {
+				$data["rules"][] = array(
+					"type" => Form::LENGTH,
+					"message" => $annotation->message,
+					"min" => $annotation->min,
+					"max" => $annotation->max
+				);
+			}
+			
+			// others
+			
+		}
+		
+		if ($isColumn && !$data["ignore"]) {
+			$data["value"] = $entity->$name;
+			$this->metadata[$entityHash]["attributes"][$name] = $data;
+			
+			$controlName = $this->getEntityClassName($this->getMainEntityData()["rc"]);
+			$propertyName = $name;
+			if ($this->metadata[$entityHash]["property"] !== NULL) {
+				$controlName .= "_" . $this->getEntityClassName($entityRc);
+				$propertyName = $this->metadata[$entityHash]["property"] . "." . $propertyName;
+			}
+			
+			$controlName .= "_{$name}";
+			
+			$this->mappings[$controlName] = array($propertyName, NULL);
+		}
+	}
+	
+	
+	private function createControls()
+	{
+		if ($this->controlsCreated) {
+			return;
+		}
+		
+		foreach ($this->metadata as $data) {
+			$attributes = $data["attributes"];
+			
+			foreach ($attributes as $name => $attributeData) {
+				if ($attributeData["ignore"]) {
+					continue;
+				}
+
+				if ($attributeData["id"]) {
+					if (!$this->allowId || $data["property"] !== NULL) {  // no ID hidden inputs for sub entities
+						continue;
+					}
+					
+					$method = "addHidden";
+				} elseif ($attributeData["password"]) {
+					$method = "addPassword";
+				} else {
+					$method = "add" . ucFirst($attributeData["inputType"]);
+				}
+				
+				$inputName = $this->getInputName($name, $data);
+				$label = $this->getLabel($attributeData, $data);
+				
+				$control = $this->form->$method($inputName, $label);
+				$attributes["controlCreated"] = TRUE;
+				
+				$isRequired = FALSE;
+				
+				foreach ($attributeData["rules"] as $rule) {
+					if ($rule["type"] === Form::REQUIRED) {
+						$isRequired = TRUE;
+						$control->setRequired($rule["message"]);
+					} elseif (isset($rule["value"])) {
+						$control->addRule($rule["type"], $rule["message"], $rule["value"]);
+					} elseif (isset($rule["min"]) && isset($rule["max"])) {
+						$control->addRule($rule["type"], $rule["message"], array($rule["min"], $rule["max"]));
+					} else {
+						$control->addRule($rule["type"], $rule["message"]);
+					}
+				}
+				
+				// due to new version of Nette calling this method is necessary
+				if (!$isRequired) {
+					$control->setRequired(FALSE);
+				}
+				
+				if ($this->setDefaultValues || $attributeData["id"]) {
+					$control->setDefaultValue($attributeData["value"]);
+				}
+				
+			}
+		}
+		
+		if ($this->useCsrfProtection) {
+			$this->form->addProtection();
+		}
+		
+		$submitButtonName = $this->getSubmitButtonName();
+		$translateKey = self::$translationFileName . ".{$this->name}.submit";
+		$label = $this->hasTranslator() ? $this->translator->translate($translateKey) : NULL;
+		$this->form->addSubmit($submitButtonName, $label);
+		
+		$this->controlsCreated = TRUE;
 	}
 	
 	
 	/**
 	 * @return string
 	 */
-	public function getSubmitButtonName()
+	private function getSubmitButtonName()
 	{
 		return "{$this->name}_submit";
 	}
@@ -552,333 +672,133 @@ class FormBuilder /* implements ArrayAccess */
 	
 	/**
 	 * @param string
-	 * @param string|NULL
-	 * @param callable
-	 * @throws \InvalidArgumentException
+	 * @param array
+	 * @return string
 	 */
-	public function setMapping($controlName, $property = NULL, $callback = NULL)
+	private function getInputName($propertyName, $metadata)
 	{
-		if ($property === NULL) {
-			$property = $controlName;
+		$mainEntityName = $this->getEntityClassName($this->getMainEntityData()["rc"]);
+		
+		$name = "{$mainEntityName}_";
+		if ($metadata["property"] !== NULL) {
+			$name .= "{$metadata["property"]}_";
 		}
 		
-		$this->mappings[$controlName] = array($property, $callback);
+		$name .= $propertyName;
 		
-		// need to set rules for new created input
-		if ($this->controlsCreated) {
-			$control = $this->form[$controlName];
-			$data = explode(".", $property);
-			$mainEntity = $this->getMainEntityData();
-			
-			if (count($data) === 1) {  // main entity
-				$entityData = $this->getMainEntityData();
-				$propertyRc = $entityData["rc"]->getProperty($property);
-			} else {  // sub entity
-				$entityData = $this->getSubEntityData($data[0]);
-				$propertyRc = $entityData["rc"]->getProperty($data[1]);
-			}
-			
-			$this->createValidationInfoForProperty($propertyRc, $entityData);
-			$this->createRulesForProperty($entityData["hash"], end($data), $control);
-		}
-		
-		return $this;
+		return $name;
 	}
 	
 	
+	/**
+	 * @param array
+	 * @param array
+	 * @return string
+	 */
+	private function getLabel($attributeData, $entityData)
+	{
+		$label = NULL;
+		if ($this->createLabels && $attributeData["id"] === FALSE) {
+			if (!$this->hasTranslator()) {
+				throw new Exceptions\FormBuilderException("Translator for FormBuilder has not been set.");
+			}
+				
+			$subEntityPropertyKey = "";
+			if ($entityData["property"] !== NULL) {
+				$subEntityPropertyKey = ".{$entityData["property"]}";
+			}
+					
+			$translateKey = self::$translationFileName . ".{$this->name}{$subEntityPropertyKey}.{$attributeData["name"]}";
+			$label = $this->translator->translate($translateKey);
+		}
+		
+		return $label;
+	}
+	
 	
 	/**
-	 * @param ReflectionProperty
-	 * @param array
+	 * Automatically sets entity's values after submitting form
 	 */
-	private function createValidationInfoForProperty($property, $entityData)
+	private function createAutoDataSetting()
 	{
-		$entity = $entityData["entity"];
-		$entityHash = $entityData["hash"];
-		$annotations = $this->annotationReader->getPropertyAnnotations($property);
-		$isColumn = FALSE;
-			
-		$this->propertiesData[$entityHash][$property->name] = array();
-			
-		foreach ($annotations as $annotation) {
-			if ($annotation instanceof ORM\Column) {
-				$isColumn = TRUE;
+		$this->form->onSuccess[] = function($form) {
+			foreach ($form->getControls() as $control) {
 				
-				if (isset($this->inputTypes[$entityHash][$property->name])) {
+				if ($control instanceof Nette\Forms\Controls\SubmitButton || $control->name === Form::TRACKER_ID || $control->name === Form::PROTECTOR_ID) {
 					continue;
 				}
-					
-				if (in_array($annotation->type, array("string", "integer", "float", "date", "datetime"))) {
-					$this->inputTypes[$entityHash][$property->name] = "text";
-				} elseif ($annotation->type === "text") {
-					$this->inputTypes[$entityHash][$property->name] = "textArea";
-				} elseif ($annotation->type === "boolean") {
-					$this->inputTypes[$entityHash][$property->name] = "checkbox";
+				
+				$name = $control->getName();
+				list($attribute, $callback) = $this->mappings[$name];
+				$entity = $this->getEntityDataByAttribute($attribute)["entity"];
+				$property = $this->getPropertyByAttribute($attribute);
+				
+				$value = $control->getValue();
+				if ($callback !== NULL) {
+					$value = $callback($value);
 				}
 				
-			} elseif ($annotation instanceof ORM\Id) {
-				$this->idProperty = $property->name;
-				
-				if (!$this->allowId || $entity !== $this->getMainEntityData()["entity"]) {
-					if (isset($this->validators[$entityHash][$property->name])) {
-						unset($this->validators[$entityHash][$property->name]);
-					}
-					
-					$this->propertiesData[$entityHash][$property->name]["isColumn"] = FALSE;
-					return;
-				}
-				
-				$this->inputTypes[$entityHash][$property->name] = "hidden";
-				
-				// asserts
-			} elseif ($annotation instanceof Assert\NotBlank || $annotation instanceof FormBuilderAssert\Filled) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::REQUIRED,
-					"msg" => $annotation->message
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\Length) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::LENGTH,
-					"msg" => $annotation->message,
-					"value" => $annotation->value
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\MinLength) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::MIN_LENGTH,
-					"msg" => $annotation->message,
-					"value" => $annotation->value
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\MaxLength) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::MAX_LENGTH,
-					"msg" => $annotation->message,
-					"value" => $annotation->value
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\Range) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::RANGE,
-					"min" => $annotation->min,
-					"max" => $annotation->max,
-					"msg" => $annotation->message,
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\Email) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::EMAIL,
-					"msg" => $annotation->message
-				);
-			} elseif ($annotation instanceof Password) {
-				$this->inputTypes[$entityHash][$property->name] = "password";
-			} elseif ($annotation instanceof FormBuilderAssert\Max) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::MAX,
-					"msg" => $annotation->message,
-					"value" => $annotation->value
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\Min) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::MIN,
-					"msg" => $annotation->message,
-					"value" => $annotation->value
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\Pattern) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::PATTERN,
-					"msg" => $annotation->message,
-					"value" => $annotation->value
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\Url) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::URL,
-					"msg" => $annotation->message
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\Integer) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::INTEGER,
-					"msg" => $annotation->message
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\Float) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::FLOAT,
-					"msg" => $annotation->message
-				);
-			} elseif ($annotation instanceof FormBuilderAssert\LengthRange) {
-				$this->validators[$entityHash][$property->name][] = array(
-					"type" => Form::LENGTH,
-					"msg" => $annotation->message,
-					"min" => $annotation->min,
-					"max" => $annotation->max
-				);
+				$entity->$property = $value;
 			}
-			
-			//  TODO: others
-			
-		}
-			
-		$this->propertiesData[$entityHash][$property->name]["isColumn"] = $isColumn;
-	}
-	
-	
-	
-	
-	/**
-	 * @param string
-	 * @throws new BadMethodCallException
-	 * @throws InvalidArgumentException
-	 */
-	public function addSubEntity($entityPropertyName)
-	{
-		$mainEntityData = $this->getMainEntityData();
-		if ($mainEntityData === NULL) {
-			throw new \BadMethodCallException("Cannot add sub-entity when there's no main entity set.");
-		}
-		
-		if (!$mainEntityData["rc"]->hasProperty($entityPropertyName)) {
-			throw new \InvalidArgumentException("Entity '{$mainEntityData["rc"]->getName()}' has no sub-entity property '{$entityPropertyName}'.");
-		}
-		
-		$entityObject = $mainEntityData["entity"]->$entityPropertyName;
-		$mainEntity = $mainEntityData["entity"];
-		$mainEntityRc = $mainEntityData["rc"];
-		
-		$exists = FALSE;
-			
-		foreach ($mainEntityRc->getProperties() as $property) {
-			if ($property->name === $entityPropertyName) {
-				$exists = TRUE;
-				break;
-			}
-		}
-			
-		if (!$exists) {
-			throw new \InvalidArgumentException("Entity-like property '{$entityPropertyName}' doesn't exist in " . get_class($this->getMainEntityData()["entity"]) . ".");
-		}
-			
-		$entityObject = $mainEntity->$entityPropertyName;
-		if ($entityObject === NULL) {
-			$entityData = $this->createEntityFromPropertyName($entityPropertyName);
-			$mainEntity->$entityPropertyName = $entityData["entity"];
-			$entity = $entityData["entity"];
-		} else {
-			// $entity = get_class($entityObject);
-			$entity = $entityObject;
-		}
-		
-		$entityRc = new ReflectionClass($entity);
-		if (!is_object($entity)) {
-			$entity = $entityRc->newInstance();
-		}
-
-		$this->entities[] = array(
-			"entity" => $entity,
-			"rc" => $entityRc,
-			"hash" => spl_object_hash($entity),
-			"class" => $entityRc->getName(),
-			"property" => $entityPropertyName
-		);
-		
-		return $this;
+		};
 	}
 	
 	
 	/**
-	 * @param bool
+	 * @param ReflectionClass
+	 * @return string
 	 */
-	public function enableCsrfProtection($enable = TRUE)
+	private function getEntityClassName($entityRc)
 	{
-		$this->useCsrfProtection = (bool) $enable;
-	}
+		$name = $entityRc->getName();
+		$nameParts = explode("\\", $name);
+		$name = lcFirst(end($nameParts));
 	
-	
-	/**
-	 * @return array|NULL
-	 */
-	public function getMainEntityData()
-	{
-		return isset($this->entities[0]) ? $this->entities[0] : NULL;
+		return $name;
 	}
 	
 	
 	/**
 	 * @param string
-	 * @return bool
-	 */
-	private function isMainEntity($hash)
-	{
-		foreach ($this->entities as $entityData) {
-			if ($entityData["hash"] === $hash) {
-				return $entityData["property"] === NULL;
-			}
-		}
-	}
-
-	
-	/**
-	 * @param string
+	 * @throws \Exception
 	 * @return array
-	 * @throws InvalidArgumentException
 	 */
-	private function createEntityFromPropertyName($property)
+	private function getEntityDataByAttribute($attribute)
 	{
-		$mainEntity = $this->getMainEntityData();
-		foreach ($mainEntity["rc"]->getProperties() as $propertyRc) {
-			if ($propertyRc->name === $property) {
-				$annotations = $this->annotationReader->getPropertyAnnotations($propertyRc);
-				foreach ($annotations as $annotation) {
-					if ($annotation instanceof ORM\OneToOne) {
-						$className = $annotation->targetEntity;
-						break 2;
-					}
+		$parts = explode(".", $attribute);
+		
+		if (count($parts) === 1) {  // main entity
+			return $this->getMainEntityData();
+		} else {  // sub entity
+			$property = reset($parts);
+			
+			foreach ($this->metadata as $data) {
+				if ($data["property"] === $property) {
+					return $data;
 				}
-				
-				throw new \InvalidArgumentException("There's no One-To-One relation via property '{$property}'.");
 			}
+			
+			throw new Exceptions\FormBuilderException("Entity in this property doesn't exist");
 		}
-		
-		$fullName = $this->getMainEntityData()["rc"]->getNamespaceName() . "\\" . $className;
-		$entityRc = new ReflectionClass($fullName);
-		$entity = $entityRc->newInstance();
-		
-		return array(
-			"entity" => $entity,
-			"rc" => $entityRc,
-			"hash" => spl_object_hash($entity),
-			"class" => $fullName,
-			"property" => $property
-		);
 	}
 	
 	
 	/**
 	 * @param string
-	 * @return array
-	 * @throws InvalidArgumentException
+	 * @return string
 	 */
-	public function getEntityDataByControlName($name)
+	private function getPropertyByAttribute($attribute)
 	{
-		$data = explode("_", $name);
+		$parts = explode(".", $attribute);
 		
-		if (count($data) === 2) {  // main entity (entity_property)
-			return $this->entities[0];
-		} elseif (count($data) === 0) {  // manual mapping
-			
-		} else {  // sub entity (mainEntity_subEntity_property)
-			$property = $data[1];
-
-			foreach ($this->entities as $entityData) {
-				if ($entityData["property"] === $property) {
-					return $entityData;
-				}
-			}
-		}
-		
-		throw new \InvalidArgumentException("There's no entity matching control name '{$name}'.");
+		return end($parts);
 	}
 	
 	
 	/**
 	 * @return ReflectionProperty
 	 */
-	public function getMainEntityIdProperty()
+	private function getMainEntityIdProperty()
 	{
 		$rc = $this->getMainEntityData()["rc"];
 		foreach ($rc->getProperties() as $property) {
@@ -893,63 +813,13 @@ class FormBuilder /* implements ArrayAccess */
 	
 	
 	/**
-	 * @return int
-	 */
-	public function getEntitiesCount()
-	{
-		return count($this->entities);
-	}
-	
-	
-	/**
-	 * Gets sub-entity data by main entity's property name.
-	 *
-	 * @param string
-	 * @return object
-	 * @throws \InvalidArgumentException
-	 */
-	public function getSubEntityData($property)
-	{
-		foreach ($this->entities as $entityData) {
-			if ($entityData["property"] === $property) {
-				return $entityData;
-			}
-		}
-		
-		throw new \InvalidArgumentException("Sub-entity '{$property}' does not exist or wasn't imported.");
-	}
-	
-	
-	/**
-	 * @param string
-	 * @return object
-	 * @throws \InvalidArgumentException
-	 */
-	public function getSubEntity($property)
-	{
-		$data = $this->getSubEntityData($property);
-		
-		return $data["entity"];
-	}
-	
-	
-	/**
-	 * @param string
-	 */
-	public function setMethod($method)
-	{
-		$this->form->setMethod($method);
-	}
-	
-	
-	/**
 	 * @return string
 	 */
 	public function __toString()
 	{
 		try {
 			if (!$this->controlsCreated) {
-				$this->createControls();
+				$this->create();
 			}
 			
 			return $this->form->__toString();

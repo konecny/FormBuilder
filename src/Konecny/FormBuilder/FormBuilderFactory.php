@@ -15,34 +15,43 @@ class FormBuilderFactory extends Nette\Object
 	/** @var Nette\Localization\ITranslator */
 	private $translator;
 	
-	/** @var string */
-	private $defaultDatetimeFormat;
-	
 	
 	/**
 	 * @param Nette\Localization\ITranslator
-	 * @param string
 	 */
-	public function __construct(Nette\Localization\ITranslator $translator = NULL, $defaultDatetimeFormat = "d.m.Y H:i:s")
+	public function __construct(Nette\Localization\ITranslator $translator = NULL)
 	{
 		$this->translator = $translator;
-		$this->defaultDatetimeFormat = $defaultDatetimeFormat;
 	}
 	
 	
 	/**
 	 * @param string
 	 * @param string|object
+	 * @param bool|NULL
+	 * @param bool|NULL
 	 * @param string|NULL
 	 * @return FormBuilder
 	 */
-	public function create($name, $entity, $datetimeFormat = NULL)
+	public function create($name, $entity, $autoMode = NULL, $autoDataSetting = NULL, $defaultDateTimeFormat = NULL)
 	{
-		if ($datetimeFormat === NULL) {
-			$datetimeFormat = $this->defaultDatetimeFormat;
+		$builder = new FormBuilder($name, $this->translator);
+		
+		if ($autoMode !== NULL) {
+			$builder->setAutoMode($autoMode);
 		}
 		
-		return new FormBuilder($name, $entity, $this->translator, $datetimeFormat);
+		if ($autoDataSetting !== NULL) {
+			$builder->setAutoDataSetting($autoDataSetting);
+		}
+		
+		if ($defaultDateTimeFormat !== NULL) {
+			$builder->setDateTimeFormat($defaultDateTimeFormat);
+		}
+		
+		$builder->setEntity($entity);
+	
+		return $builder;
 	}
 	
 }
